@@ -1,0 +1,239 @@
+#!/bin/bash
+
+DESCRIPTION="Manage MySQL or Percona Server containers in Docker, for testing"
+
+set -eu
+
+: ${USER:=$(whoami)}
+: ${SANDBAG_HOME:=$HOME/sandbag}
+: ${SANDBAG_IMAGE:=percona/percona-server:5.6}
+: ${SANDBAG_USER:=root}
+: ${SANDBAG_PASSWORD:=masterkey}
+: ${SANDBAG_PORT_BASE:=3306}
+: ${SANDBAG_SSL_SUBJ:=/C=US/ST=California/L=San Francisco}
+: ${SANDBAG_SSL_CA:=${SANDBAG_SSL_SUBJ}/CN=fake-CA}
+: ${SANDBAG_SSL_SERVER:=${SANDBAG_SSL_SUBJ}/CN=fake-server}
+: ${SANDBAG_SSL_CLIENT:=${SANDBAG_SSL_SUBJ}/CN=fake-client}
+
+OPENSSL=$(which openssl)
+PV=$(which pv) && PV="${PV} -pert" || PV=cat
+
+VERBOSE=0
+
+function log() {
+    local level
+    local message
+    level=$1
+    message="$2"
+    printf "%-5s %s %s\n" ${level} $(date '+%F %T') "${message}"
+}
+
+function info() {
+    if [ ${VERBOSE} = 1 ] ; then
+        log "INFO" "$@"
+    fi
+}
+
+function warn() {
+    log "WARN" "$@"
+}
+
+function error() {
+    log "ERROR" "$@"
+}
+
+usage() {
+	status=$1
+	cat <<USAGE
+Usage: $0 [ options... ]
+${DESCRIPTION}
+-d DIRECTORY  Create container config and data under directory (default: ${SANDBAG_HOME})
+-i IMAGE      Launch container for image (default: ${SANDBAG_IMAGE})
+-p PASSWORD   Set password for user (default: ${SANDBAG_PASSWORD})
+-u USER       Create user (default: ${SANDBAG_USER})
+-v            Verbose output
+-h            Display this usage message
+
+Commands:
+ gencerts
+ new NAME
+ start NAME
+ stop NAME
+ restart NAME
+ status
+ use NAME
+ dump NAME FILE.gz
+ load NAME FILE.gz
+ replicate MASTER_NAME REPLICA_NAME
+USAGE
+    exit $status
+}
+
+while getopts "d:i:p:u:vh" opt; do
+	case $opt in
+	d) SANDBAG_HOME=${OPTARG} ;;
+	i) SANDBAG_IMAGE=${OPTARG} ;;
+	p) SANDBAG_PASSWORD=${OPTARG} ;;
+	u) SANDBAG_USER=${OPTARG} ;;
+	v) VERBOSE=1 ;;
+	h) usage 0 ;;
+	esac
+done
+shift $((OPTIND - 1))
+
+COMMAND=$1
+case ${COMMAND} in
+new|start|stop|restart|status|gencerts|use|dump|load|replicate) ;;
+*) error "Unknown command '${COMMAND}'" ; usage 1 ;;
+esac
+shift
+
+mkdir -p "${SANDBAG_HOME}"
+cd "${SANDBAG_HOME}"
+
+function gencerts() {
+    mkdir -p "${SANDBAG_HOME}/certs"
+    (
+        cd "${SANDBAG_HOME}/certs"
+        openssl genrsa 2048 > ca-key.pem
+        openssl req -new -x509 -nodes -days 3600 -subj "${SANDBAG_SSL_CA}" -key ca-key.pem -out ca.pem
+        openssl req -newkey rsa:2048 -days 3600 -nodes -subj "${SANDBAG_SSL_SERVER}" -keyout server-key.pem -out server-req.pem
+        openssl rsa -in server-key.pem -out server-key.pem
+        openssl x509 -req -in server-req.pem -days 3600 -CA ca.pem -CAkey ca-key.pem -set_serial 01 -out server-cert.pem
+        openssl req -newkey rsa:2048 -days 3600 -nodes -subj "${SANDBAG_SSL_CLIENT}" -keyout client-key.pem -out client-req.pem
+        openssl rsa -in client-key.pem -out client-key.pem
+        openssl x509 -req -in client-req.pem -days 3600 -CA ca.pem -CAkey ca-key.pem -set_serial 01 -out client-cert.pem
+        openssl verify -CAfile ca.pem server-cert.pem client-cert.pem
+    )
+}
+
+function new() {
+    if [ ! -f "${SANDBAG_HOME}/certs/ca.pem" ] ; then
+        error "Missing CA in '${SANDBAG_HOME}/certs/ca.pem'. Run $0 gencerts"
+        return 1
+    fi
+    instance=$1
+    shift
+    if [ -d "data/${instance}" ] ; then
+        error "ERROR: instance '${instance}' already exists"
+        return 1
+    fi
+    info "Creating new instance '${instance}'"
+    mkdir -p conf
+    port=$(find conf -name '*-server.cnf' -print0 | xargs -0 grep '^port' | cut -d= -f2 | sed -e 's/ //g' | sort -n | tail -1)
+    if [ -z "${port}" ] ; then
+        port=${SANDBAG_PORT_BASE}
+    fi
+    ((port++))
+    serverid=${port}
+
+    cat > conf/${instance}-server.cnf <<-MYCNF
+[mysqld]
+ssl                      = true
+ssl-cert                 = /etc/certs/server-cert.pem
+ssl-key                  = /etc/certs/server-key.pem
+ssl-ca                   = /etc/certs/ca.pem
+ssl-cipher               = ECDHE-RSA-AES128-GCM-SHA256:ECDHE-RSA-AES256-GCM-SHA384:ECDHE-RSA-AES128-SHA256:ECDHE-RSA-AES256-SHA384:AES128-GCM-SHA256:AES256-GCM-SHA384:AES128-SHA256:AES256-SHA256:DHE-DSS-AES256-SHA256:DHE-RSA-AES256-GCM-SHA384:DHE-RSA-AES256-SHA256:ECDHE-ECDSA-AES128-GCM-SHA256:ECDHE-ECDSA-AES128-SHA256:ECDHE-ECDSA-AES256-GCM-SHA384:ECDHE-ECDSA-AES256-SHA384
+server-id                = ${serverid}
+tls_version              = TLSv1.2
+init-connect             = SET NAMES utf8mb4
+log-bin                  = mysql-bin
+log-slave-updates        = ON
+binlog_format            = ROW
+gtid_mode                = ON
+enforce_gtid_consistency = ON
+MYCNF
+
+    cat > conf/${instance}-client.cnf <<-MYCNF
+[client]
+host                     = 127.0.0.1
+ssl-mode                 = required
+ssl-ca                   = certs/ca.pem
+ssl-cert                 = certs/client-cert.pem
+ssl-key                  = certs/client-key.pem
+port                     = ${port}
+user                     = ${SANDBAG_USER}
+password                 = ${SANDBAG_PASSWORD}
+MYCNF
+
+    mkdir -p "data/${instance}"
+    docker run -d \
+        --name "${instance}" \
+        -v "$(pwd)/data/${instance}:/var/lib/mysql" \
+        -v "$(pwd)/conf/${instance}-server.cnf:/etc/my.cnf" \
+        -v "$(pwd)/certs:/etc/certs" \
+        -e "MYSQL_ROOT_PASSWORD=${SANDBAG_PASSWORD}" \
+        -e MYSQL_ROOT_HOST='172.%.%.%' \
+        -p ${port}:3306 \
+        ${SANDBAG_IMAGE} "$@"
+}
+
+function start() {
+    instance=$1
+    shift
+    info "Starting instance '${instance}'"
+    warn "TODO: start()"
+}
+
+function stop() {
+    instance=$1
+    shift
+    info "Stopping instance '${instance}'"
+    warn "TODO: stop()"
+}
+
+function restart() {
+    instance=$1
+    stop "${instance}"
+    start "${instance}"
+}
+
+function status() {
+    warn "TODO: status()"
+}
+
+function use() {
+    instance=$1
+    shift
+    mysql "--defaults-file=conf/${instance}-client.cnf" "$@"
+}
+
+function dump() {
+    instance=$1
+    dumpfile=$2
+    shift 2
+    info "Dumping dumpfile '${dumpfile}' from instance '${instance}'"
+    mysqldump "--defaults-file=conf/${instance}-client.cnf" --single-transaction "$@" | \
+        gzip -c | ${PV} > "${dumpfile}"
+}
+
+function load() {
+    instance=$1
+    dumpfile=$2
+    shift 2
+    info "Loading dumpfile '${dumpfile}' into instance '${instance}'"
+    ${PV} "${dumpfile}" | gunzip -c | \
+    mysql "--defaults-file=conf/${instance}-client.cnf" "$@"
+}
+
+function replicate() {
+    master=$1
+    replica=$2
+    shift 2
+    if [ ! -d data/${instance} ] ; then
+        new "${replica}" --link "${master}" "$@"
+    fi
+    info "Replicate instance '${replica}' from master instance '${master}'"
+    use ${master} -e "CREATE USER 'repl'@'%' ..."
+    use ${master} -e "GRANT REPLICATION_SLAVE ON *.* TO 'repl'@'%'"
+    use ${replica} -e "CHANGE MASTER TO MASTER_HOST='${master}'"
+    # TODO: GTID
+    info "Copy data from master '${master}' to replica '${replica}'"
+    mysqldump "--defaults-file=conf/${master}-client.cnf" --single-transaction --all-databases | \
+        ${PV} | mysql "--defaults-file=conf/${replica}-client.cnf"
+    info "Start replication on replica '${replica}'"
+    use ${replica} -e "START SLAVE"
+}
+
+${COMMAND} "$@"
+
