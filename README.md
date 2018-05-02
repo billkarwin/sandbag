@@ -8,7 +8,7 @@ You can run different versions, set up replication, and connect the MySQL client
 
 This tool is inspired by the work in [dbdeployer](https://www.dbdeployer.com/)
 and its predecessor [MySQL Sandbox](https://mysqlsandbox.net/),
-bug sandbag runs the MySQL instances in Docker containers.
+but sandbag runs the MySQL instances in Docker containers.
 
 This tool is intended to run MySQL or Percona Server containers only for testing, not for production use.
 If you want to Docker for MySQL in production, best of luck, but don't ask me for help.
@@ -16,9 +16,6 @@ If you want to Docker for MySQL in production, best of luck, but don't ask me fo
 Tested with MySQL 5.6, 5.7, 8.0 Docker images, and Percona Server 5.6 and 5.7 Docker images.
 
 If you want to use this script with MariaDB, best of luck, but don't ask me about it.
-
-Don't ask me about running MySQL or Docker or even bash on Microsoft Windows.
-In fact, it's best if you do not mention Windows at all.
 
 Dependencies
 =
@@ -103,7 +100,7 @@ Open a MySQL client from your host environment, and connect to MySQL in the name
 Export data using mysqldump, to a file _DUMPFILE.gz_.
 The file will be output gzip-compressed.
 
-    sandbag load NAME DUMPFILE
+    sandbag load NAME DUMPFILE.gz
 
 Import data from a previously saved file _DUMPFILE.gz_.
 The file must be gzip-compressed.
