@@ -56,7 +56,8 @@ ${DESCRIPTION}
 
 Commands:
  gencerts
- new NAME
+ create NAME
+ destroy NAME
  start NAME
  stop NAME
  restart NAME
@@ -83,7 +84,7 @@ shift $((OPTIND - 1))
 
 COMMAND=$1
 case ${COMMAND} in
-new|start|stop|restart|status|gencerts|use|dump|load|replicate) ;;
+create|destroy|start|stop|restart|status|gencerts|use|dump|load|replicate) ;;
 *) error "Unknown command '${COMMAND}'" ; usage 1 ;;
 esac
 shift
@@ -107,7 +108,7 @@ function gencerts() {
     )
 }
 
-function new() {
+function create() {
     if [ ! -f "${SANDBAG_HOME}/certs/ca.pem" ] ; then
         error "Missing CA in '${SANDBAG_HOME}/certs/ca.pem'. Run $0 gencerts"
         return 1
@@ -166,6 +167,13 @@ MYCNF
         -e MYSQL_ROOT_HOST='172.%.%.%' \
         -p ${port}:3306 \
         ${SANDBAG_IMAGE} "$@"
+}
+
+function destroy() {
+    instance=$1
+    shift
+    info "Destroying instance '${instance}'"
+    warn "TODO: destroy()"
 }
 
 function start() {
